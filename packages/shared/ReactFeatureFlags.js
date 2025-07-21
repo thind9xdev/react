@@ -31,14 +31,8 @@ export const enableHydrationLaneScheduling = true;
 // like migrating internal callers or performance testing.
 // -----------------------------------------------------------------------------
 
-// TODO: Finish rolling out in www
-export const favorSafetyOverHydrationPerf = true;
-
 // Need to remove didTimeout argument from Scheduler before landing
 export const disableSchedulerTimeoutInWorkLoop = false;
-
-// TODO: Land at Meta before removing.
-export const disableDefaultPropsExceptForClasses = true;
 
 // -----------------------------------------------------------------------------
 // Slated for removal in the future (significant effort)
@@ -156,8 +150,6 @@ export const transitionLaneExpirationMs = 5000;
  * by setState or similar outside of the component owning the state.
  */
 export const enableInfiniteRenderLoopDetection = false;
-
-export const enableLazyPublicInstanceInFabric = false;
 
 export const enableFragmentRefs = __EXPERIMENTAL__;
 

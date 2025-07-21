@@ -178,7 +178,6 @@ import {
   enableScopeAPI,
   enablePostpone,
   enableHalt,
-  disableDefaultPropsExceptForClasses,
   enableAsyncIterableChildren,
   enableViewTransition,
   enableFizzBlockingRender,
@@ -667,7 +666,6 @@ export function resumeRequest(
   request.nextSegmentId = postponedState.nextSegmentId;
 
   if (typeof postponedState.replaySlots === 'number') {
-    const resumedId = postponedState.replaySlots;
     // We have a resume slot at the very root. This is effectively just a full rerender.
     const rootSegment = createPendingSegment(
       request,
@@ -678,7 +676,6 @@ export function resumeRequest(
       false,
       false,
     );
-    rootSegment.id = resumedId;
     // There is no parent so conceptually, we're unblocked to flush this segment.
     rootSegment.parentFlushed = true;
     const rootTask = createRenderTask(
@@ -1020,6 +1017,7 @@ function pushHaltedAwaitOnComponentStack(
             stack: bestStack.debugStack,
           };
           task.debugTask = (bestStack.debugTask: any);
+          break;
         }
       }
     }
@@ -1105,8 +1103,8 @@ function pushComponentStack(task: Task): void {
 function createComponentStackFromType(
   parent: null | ComponentStackNode,
   type: Function | string | symbol,
-  owner: null | ReactComponentInfo | ComponentStackNode, // DEV only
-  stack: null | Error, // DEV only
+  owner: void | null | ReactComponentInfo | ComponentStackNode, // DEV only
+  stack: void | null | string | Error, // DEV only
 ): ComponentStackNode {
   if (__DEV__) {
     return {
@@ -1120,6 +1118,20 @@ function createComponentStackFromType(
     parent,
     type,
   };
+}
+
+function replaceSuspenseComponentStackWithSuspenseFallbackStack(
+  componentStack: null | ComponentStackNode,
+): null | ComponentStackNode {
+  if (componentStack === null) {
+    return null;
+  }
+  return createComponentStackFromType(
+    componentStack.parent,
+    'Suspense Fallback',
+    __DEV__ ? componentStack.owner : null,
+    __DEV__ ? componentStack.stack : null,
+  );
 }
 
 type ThrownInfo = {
@@ -1350,6 +1362,8 @@ function renderSuspenseBoundary(
   contentRootSegment.parentFlushed = true;
 
   if (request.trackedPostpones !== null) {
+    // Stash the original stack frame.
+    const suspenseComponentStack = task.componentStack;
     // This is a prerender. In this mode we want to render the fallback synchronously and schedule
     // the content to render later. This is the opposite of what we do during a normal render
     // where we try to skip rendering the fallback if the content itself can render synchronously
@@ -1374,6 +1388,10 @@ function renderSuspenseBoundary(
       request.resumableState,
       prevContext,
     );
+    task.componentStack =
+      replaceSuspenseComponentStackWithSuspenseFallbackStack(
+        suspenseComponentStack,
+      );
     boundarySegment.status = RENDERING;
     try {
       renderNode(request, task, fallback, -1);
@@ -1419,7 +1437,7 @@ function renderSuspenseBoundary(
       task.context,
       task.treeContext,
       null, // The row gets reset inside the Suspense boundary.
-      task.componentStack,
+      suspenseComponentStack,
       !disableLegacyContext ? task.legacyContext : emptyContextObject,
       __DEV__ ? task.debugTask : null,
     );
@@ -1572,7 +1590,9 @@ function renderSuspenseBoundary(
       task.context,
       task.treeContext,
       task.row,
-      task.componentStack,
+      replaceSuspenseComponentStackWithSuspenseFallbackStack(
+        task.componentStack,
+      ),
       !disableLegacyContext ? task.legacyContext : emptyContextObject,
       __DEV__ ? task.debugTask : null,
     );
@@ -1744,7 +1764,7 @@ function replaySuspenseBoundary(
     task.context,
     task.treeContext,
     task.row,
-    task.componentStack,
+    replaceSuspenseComponentStackWithSuspenseFallbackStack(task.componentStack),
     !disableLegacyContext ? task.legacyContext : emptyContextObject,
     __DEV__ ? task.debugTask : null,
   );
@@ -2184,7 +2204,7 @@ function renderSuspenseList(
 
 function renderPreamble(
   request: Request,
-  task: Task,
+  task: RenderTask,
   blockedSegment: Segment,
   node: ReactNodeList,
 ): void {
@@ -2197,28 +2217,21 @@ function renderPreamble(
     false,
   );
   blockedSegment.preambleChildren.push(preambleSegment);
-  // @TODO we can just attempt to render in the current task rather than spawning a new one
-  const preambleTask = createRenderTask(
-    request,
-    null,
-    node,
-    -1,
-    task.blockedBoundary,
-    preambleSegment,
-    task.blockedPreamble,
-    task.hoistableState,
-    request.abortableTasks,
-    task.keyPath,
-    task.formatContext,
-    task.context,
-    task.treeContext,
-    task.row,
-    task.componentStack,
-    !disableLegacyContext ? task.legacyContext : emptyContextObject,
-    __DEV__ ? task.debugTask : null,
-  );
-  pushComponentStack(preambleTask);
-  request.pingedTasks.push(preambleTask);
+  task.blockedSegment = preambleSegment;
+  try {
+    preambleSegment.status = RENDERING;
+    renderNode(request, task, node, -1);
+    pushSegmentFinale(
+      preambleSegment.chunks,
+      request.renderState,
+      preambleSegment.lastPushedText,
+      preambleSegment.textEmbedded,
+    );
+    preambleSegment.status = COMPLETED;
+    finishedSegment(request, task.blockedBoundary, preambleSegment);
+  } finally {
+    task.blockedSegment = blockedSegment;
+  }
 }
 
 function renderHostElement(
@@ -2270,7 +2283,8 @@ function renderHostElement(
       props,
     ));
     if (isPreambleContext(newContext)) {
-      renderPreamble(request, task, segment, children);
+      // $FlowFixMe: Refined
+      renderPreamble(request, (task: RenderTask), segment, children);
     } else {
       // We use the non-destructive form because if something suspends, we still
       // need to pop back up and finish this subtree of HTML.
@@ -2399,12 +2413,7 @@ export function resolveClassComponentProps(
 
   // Resolve default props.
   const defaultProps = Component.defaultProps;
-  if (
-    defaultProps &&
-    // If disableDefaultPropsExceptForClasses is true, we always resolve
-    // default props here, rather than in the JSX runtime.
-    disableDefaultPropsExceptForClasses
-  ) {
+  if (defaultProps) {
     // We may have already copied the props object above to remove ref. If so,
     // we can modify that. Otherwise, copy the props object with Object.assign.
     if (newProps === baseProps) {
@@ -2453,7 +2462,6 @@ const didWarnAboutContextTypes: {[string]: boolean} = {};
 const didWarnAboutContextTypeOnFunctionComponent: {[string]: boolean} = {};
 const didWarnAboutGetDerivedStateOnFunctionComponent: {[string]: boolean} = {};
 let didWarnAboutReassigningProps = false;
-const didWarnAboutDefaultPropsOnFunctionComponent: {[string]: boolean} = {};
 let didWarnAboutGenerators = false;
 let didWarnAboutMaps = false;
 
@@ -2610,22 +2618,6 @@ function validateFunctionComponentInDev(Component: any): void {
       );
     }
 
-    if (
-      !disableDefaultPropsExceptForClasses &&
-      Component.defaultProps !== undefined
-    ) {
-      const componentName = getComponentNameFromType(Component) || 'Unknown';
-
-      if (!didWarnAboutDefaultPropsOnFunctionComponent[componentName]) {
-        console.error(
-          '%s: Support for defaultProps will be removed from function components ' +
-            'in a future major release. Use JavaScript default parameters instead.',
-          componentName,
-        );
-        didWarnAboutDefaultPropsOnFunctionComponent[componentName] = true;
-      }
-    }
-
     if (typeof Component.getDerivedStateFromProps === 'function') {
       const componentName = getComponentNameFromType(Component) || 'Unknown';
 
@@ -2653,29 +2645,6 @@ function validateFunctionComponentInDev(Component: any): void {
       }
     }
   }
-}
-
-function resolveDefaultPropsOnNonClassComponent(
-  Component: any,
-  baseProps: Object,
-): Object {
-  if (disableDefaultPropsExceptForClasses) {
-    // Support for defaultProps is removed in React 19 for all types
-    // except classes.
-    return baseProps;
-  }
-  if (Component && Component.defaultProps) {
-    // Resolve default props. Taken from ReactElement
-    const props = assign({}, baseProps);
-    const defaultProps = Component.defaultProps;
-    for (const propName in defaultProps) {
-      if (props[propName] === undefined) {
-        props[propName] = defaultProps[propName];
-      }
-    }
-    return props;
-  }
-  return baseProps;
 }
 
 function renderForwardRef(
@@ -2735,11 +2704,7 @@ function renderMemo(
   ref: any,
 ): void {
   const innerType = type.type;
-  const resolvedProps = resolveDefaultPropsOnNonClassComponent(
-    innerType,
-    props,
-  );
-  renderElement(request, task, keyPath, innerType, resolvedProps, ref);
+  renderElement(request, task, keyPath, innerType, props, ref);
 }
 
 function renderContextConsumer(
@@ -2819,11 +2784,7 @@ function renderLazyComponent(
     // eslint-disable-next-line no-throw-literal
     throw null;
   }
-  const resolvedProps = resolveDefaultPropsOnNonClassComponent(
-    Component,
-    props,
-  );
-  renderElement(request, task, keyPath, Component, resolvedProps, ref);
+  renderElement(request, task, keyPath, Component, props, ref);
 }
 
 function renderActivity(
@@ -4661,10 +4622,12 @@ function abortTask(task: Task, request: Request, error: mixed): void {
     if (node !== null && typeof node === 'object') {
       // Push a fake component stack frame that represents the await.
       pushHaltedAwaitOnComponentStack(task, node._debugInfo);
+      /*
       if (task.thenableState !== null) {
         // TODO: If we were stalled inside use() of a Client Component then we should
         // rerender to get the stack trace from the use() call.
       }
+      */
     }
   }
 
@@ -6361,6 +6324,7 @@ export function getPostponedState(request: Request): null | PostponedState {
     return null;
   }
   let replaySlots: ResumeSlots;
+  let nextSegmentId: number;
   if (
     request.completedRootSegment !== null &&
     // The Root postponed
@@ -6368,17 +6332,21 @@ export function getPostponedState(request: Request): null | PostponedState {
       // Or the Preamble was not available
       request.completedPreambleSegments === null)
   ) {
-    // This is necessary for the pending preamble case and is idempotent for the
-    // postponed root case
-    replaySlots = request.completedRootSegment.id;
+    nextSegmentId = 0;
+    // We need to ensure that on resume we retry the root. We use a number
+    // type for the replaySlots to signify this (see resumeRequest).
+    // The value -1 represents an unassigned ID but is not functionally meaningful
+    // for resuming at the root.
+    replaySlots = -1;
     // We either postponed the root or we did not have a preamble to flush
     resetResumableState(request.resumableState, request.renderState);
   } else {
+    nextSegmentId = request.nextSegmentId;
     replaySlots = trackedPostpones.rootSlots;
     completeResumableState(request.resumableState);
   }
   return {
-    nextSegmentId: request.nextSegmentId,
+    nextSegmentId,
     rootFormatContext: request.rootFormatContext,
     progressiveChunkSize: request.progressiveChunkSize,
     resumableState: request.resumableState,
