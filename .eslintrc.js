@@ -468,6 +468,7 @@ module.exports = {
       files: ['packages/react-server-dom-webpack/**/*.js'],
       globals: {
         __webpack_chunk_load__: 'readonly',
+        __webpack_get_script_filename__: 'readonly',
         __webpack_require__: 'readonly',
       },
     },
@@ -546,7 +547,6 @@ module.exports = {
   },
 
   globals: {
-    $Call: 'readonly',
     $ElementType: 'readonly',
     $Flow$ModuleRef: 'readonly',
     $FlowFixMe: 'readonly',

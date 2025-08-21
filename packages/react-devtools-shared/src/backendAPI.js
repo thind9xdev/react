@@ -221,6 +221,7 @@ function backendToFrontendSerializedAsyncInfo(
       description: ioInfo.description,
       start: ioInfo.start,
       end: ioInfo.end,
+      byteSize: ioInfo.byteSize,
       value: ioInfo.value,
       env: ioInfo.env,
       owner:
@@ -251,12 +252,14 @@ export function convertInspectedElementBackendToFrontend(
     canToggleError,
     isErrored,
     canToggleSuspense,
+    isSuspended,
     hasLegacyContext,
     id,
     type,
     owners,
     env,
     source,
+    stack,
     context,
     hooks,
     plugins,
@@ -269,6 +272,8 @@ export function convertInspectedElementBackendToFrontend(
     errors,
     warnings,
     suspendedBy,
+    suspendedByRange,
+    unknownSuspenders,
     nativeTag,
   } = inspectedElementBackend;
 
@@ -285,6 +290,7 @@ export function convertInspectedElementBackendToFrontend(
     canToggleError,
     isErrored,
     canToggleSuspense,
+    isSuspended,
     hasLegacyContext,
     id,
     key,
@@ -295,6 +301,7 @@ export function convertInspectedElementBackendToFrontend(
     // Previous backend implementations (<= 6.1.5) have a different interface for Source.
     // This gates the source features for only compatible backends: >= 6.1.6
     source: Array.isArray(source) ? source : null,
+    stack: stack,
     type,
     owners:
       owners === null
@@ -311,6 +318,8 @@ export function convertInspectedElementBackendToFrontend(
       hydratedSuspendedBy == null // backwards compat
         ? []
         : hydratedSuspendedBy.map(backendToFrontendSerializedAsyncInfo),
+    suspendedByRange,
+    unknownSuspenders,
     nativeTag,
   };
 

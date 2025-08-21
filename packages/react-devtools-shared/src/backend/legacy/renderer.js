@@ -34,6 +34,7 @@ import {
   TREE_OPERATION_ADD,
   TREE_OPERATION_REMOVE,
   TREE_OPERATION_REORDER_CHILDREN,
+  UNKNOWN_SUSPENDERS_NONE,
 } from '../../constants';
 import {decorateMany, forceUpdate, restoreMany} from './utils';
 
@@ -426,6 +427,7 @@ export function attach(
       pushOperation(ownerID);
       pushOperation(displayNameStringID);
       pushOperation(keyStringID);
+      pushOperation(getStringID(null)); // name prop
     }
   }
 
@@ -796,6 +798,7 @@ export function attach(
             id: getID(owner),
             key: element.key,
             env: null,
+            stack: null,
             type: getElementType(owner),
           });
           if (owner._currentElement) {
@@ -834,8 +837,11 @@ export function attach(
 
       // Suspense did not exist in legacy versions
       canToggleSuspense: false,
+      isSuspended: null,
 
       source: null,
+
+      stack: null,
 
       // Only legacy context exists in legacy versions.
       hasLegacyContext: true,
@@ -854,6 +860,8 @@ export function attach(
 
       // Not supported in legacy renderers.
       suspendedBy: [],
+      suspendedByRange: null,
+      unknownSuspenders: UNKNOWN_SUSPENDERS_NONE,
 
       // List of owners
       owners,

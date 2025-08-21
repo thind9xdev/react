@@ -24,7 +24,6 @@ import FetchFileWithCachingContext from './FetchFileWithCachingContext';
 import {symbolicateSourceWithCache} from 'react-devtools-shared/src/symbolicateSource';
 import OpenInEditorButton from './OpenInEditorButton';
 import InspectedElementViewSourceButton from './InspectedElementViewSourceButton';
-import Skeleton from './Skeleton';
 import useEditorURL from '../useEditorURL';
 
 import styles from './InspectedElement.css';
@@ -34,6 +33,8 @@ import type {ReactFunctionLocation} from 'shared/ReactTypes';
 export type Props = {};
 
 // TODO Make edits and deletes also use transition API!
+
+const noSourcePromise = Promise.resolve(null);
 
 export default function InspectedElementWrapper(_: Props): React.Node {
   const {inspectedElementID} = useContext(TreeStateContext);
@@ -51,13 +52,20 @@ export default function InspectedElementWrapper(_: Props): React.Node {
 
   const fetchFileWithCaching = useContext(FetchFileWithCachingContext);
 
-  const symbolicatedSourcePromise: null | Promise<ReactFunctionLocation | null> =
-    React.useMemo(() => {
-      if (inspectedElement == null) return null;
-      if (fetchFileWithCaching == null) return Promise.resolve(null);
+  const source =
+    inspectedElement == null
+      ? null
+      : inspectedElement.source != null
+        ? inspectedElement.source
+        : inspectedElement.stack != null && inspectedElement.stack.length > 0
+          ? inspectedElement.stack[0]
+          : null;
 
-      const {source} = inspectedElement;
-      if (source == null) return Promise.resolve(null);
+  const symbolicatedSourcePromise: Promise<ReactFunctionLocation | null> =
+    React.useMemo(() => {
+      if (fetchFileWithCaching == null) return noSourcePromise;
+
+      if (source == null) return noSourcePromise;
 
       const [, sourceURL, line, column] = source;
       return symbolicateSourceWithCache(
@@ -66,7 +74,7 @@ export default function InspectedElementWrapper(_: Props): React.Node {
         line,
         column,
       );
-    }, [inspectedElement]);
+    }, [source]);
 
   const element =
     inspectedElementID !== null
@@ -107,7 +115,7 @@ export default function InspectedElementWrapper(_: Props): React.Node {
     element !== null &&
     element.type === ElementTypeSuspense &&
     inspectedElement != null &&
-    inspectedElement.state != null;
+    inspectedElement.isSuspended;
 
   const canToggleError =
     !hideToggleErrorAction &&
@@ -196,7 +204,9 @@ export default function InspectedElementWrapper(_: Props): React.Node {
   }
 
   return (
-    <div className={styles.InspectedElement}>
+    <div
+      className={styles.InspectedElement}
+      key={inspectedElementID /* Force reset when selected Element changes */}>
       <div className={styles.TitleRow} data-testname="InspectedElement-Title">
         {strictModeBadge}
 
@@ -223,16 +233,13 @@ export default function InspectedElementWrapper(_: Props): React.Node {
 
         {!alwaysOpenInEditor &&
           !!editorURL &&
-          inspectedElement != null &&
-          inspectedElement.source != null &&
+          source != null &&
           symbolicatedSourcePromise != null && (
-            <React.Suspense fallback={<Skeleton height={16} width={24} />}>
-              <OpenInEditorButton
-                editorURL={editorURL}
-                source={inspectedElement.source}
-                symbolicatedSourcePromise={symbolicatedSourcePromise}
-              />
-            </React.Suspense>
+            <OpenInEditorButton
+              editorURL={editorURL}
+              source={source}
+              symbolicatedSourcePromise={symbolicatedSourcePromise}
+            />
           )}
 
         {canToggleError && (
@@ -276,7 +283,7 @@ export default function InspectedElementWrapper(_: Props): React.Node {
 
         {!hideViewSourceAction && (
           <InspectedElementViewSourceButton
-            source={inspectedElement ? inspectedElement.source : null}
+            source={source}
             symbolicatedSourcePromise={symbolicatedSourcePromise}
           />
         )}
@@ -286,11 +293,8 @@ export default function InspectedElementWrapper(_: Props): React.Node {
         <div className={styles.Loading}>Loading...</div>
       )}
 
-      {inspectedElement !== null && symbolicatedSourcePromise != null && (
+      {inspectedElement !== null && (
         <InspectedElementView
-          key={
-            inspectedElementID /* Force reset when selected Element changes */
-          }
           element={element}
           hookNames={hookNames}
           inspectedElement={inspectedElement}
