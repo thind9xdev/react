@@ -13,6 +13,7 @@ import {inspect} from 'util';
 import {
   PROFILING_FLAG_BASIC_SUPPORT,
   PROFILING_FLAG_TIMELINE_SUPPORT,
+  PROFILING_FLAG_PERFORMANCE_TRACKS_SUPPORT,
   TREE_OPERATION_ADD,
   TREE_OPERATION_REMOVE,
   TREE_OPERATION_REMOVE_ROOT,
@@ -24,6 +25,7 @@ import {
   SUSPENSE_TREE_OPERATION_REMOVE,
   SUSPENSE_TREE_OPERATION_REORDER_CHILDREN,
   SUSPENSE_TREE_OPERATION_RESIZE,
+  SUSPENSE_TREE_OPERATION_SUSPENDERS,
 } from '../constants';
 import {ElementTypeRoot} from '../frontend/types';
 import {
@@ -32,6 +34,7 @@ import {
   shallowDiffers,
   utfDecodeStringWithRanges,
   parseElementDisplayNameFromBackend,
+  unionOfTwoArrays,
 } from '../utils';
 import {localStorageGetItem, localStorageSetItem} from '../storage';
 import {__DEBUG__} from '../constants';
@@ -49,6 +52,8 @@ import type {
   ComponentFilter,
   ElementType,
   SuspenseNode,
+  SuspenseTimelineStep,
+  Rect,
 } from 'react-devtools-shared/src/frontend/types';
 import type {
   FrontendBridge,
@@ -56,6 +61,31 @@ import type {
 } from 'react-devtools-shared/src/bridge';
 import UnsupportedBridgeOperationError from 'react-devtools-shared/src/UnsupportedBridgeOperationError';
 import type {DevToolsHookSettings} from '../backend/types';
+
+import RBush from 'rbush';
+
+// Custom version which works with our Rect data structure.
+class RectRBush extends RBush<Rect> {
+  toBBox(rect: Rect): {
+    minX: number,
+    minY: number,
+    maxX: number,
+    maxY: number,
+  } {
+    return {
+      minX: rect.x,
+      minY: rect.y,
+      maxX: rect.x + rect.width,
+      maxY: rect.y + rect.height,
+    };
+  }
+  compareMinX(a: Rect, b: Rect): number {
+    return a.x - b.x;
+  }
+  compareMinY(a: Rect, b: Rect): number {
+    return a.y - b.y;
+  }
+}
 
 const debug = (methodName: string, ...args: Array<string>) => {
   if (__DEBUG__) {
@@ -85,12 +115,21 @@ export type Config = {
   supportsTraceUpdates?: boolean,
 };
 
+const ADVANCED_PROFILING_NONE = 0;
+const ADVANCED_PROFILING_TIMELINE = 1;
+const ADVANCED_PROFILING_PERFORMANCE_TRACKS = 2;
+type AdvancedProfiling = 0 | 1 | 2;
+
 export type Capabilities = {
   supportsBasicProfiling: boolean,
   hasOwnerMetadata: boolean,
   supportsStrictMode: boolean,
-  supportsTimeline: boolean,
+  supportsAdvancedProfiling: AdvancedProfiling,
 };
+
+function isNonZeroRect(rect: Rect) {
+  return rect.width > 0 || rect.height > 0 || rect.x > 0 || rect.y > 0;
+}
 
 /**
  * The store is the single source of truth for updates from the backend.
@@ -110,7 +149,8 @@ export default class Store extends EventEmitter<{
   roots: [],
   rootSupportsBasicProfiling: [],
   rootSupportsTimelineProfiling: [],
-  suspenseTreeMutated: [],
+  rootSupportsPerformanceTracks: [],
+  suspenseTreeMutated: [[Map<SuspenseNode['id'], SuspenseNode['id']>]],
   supportsNativeStyleEditor: [],
   supportsReloadAndProfile: [],
   unsupportedBridgeProtocolDetected: [],
@@ -179,6 +219,9 @@ export default class Store extends EventEmitter<{
   // Renderer ID is needed to support inspection fiber props, state, and hooks.
   _rootIDToRendererID: Map<Element['id'], number> = new Map();
 
+  // Stores all the SuspenseNode rects in an R-tree to make it fast to find overlaps.
+  _rtree: RBush<Rect> = new RectRBush();
+
   // These options may be initially set by a configuration option when constructing the Store.
   _supportsInspectMatchingDOMElement: boolean = false;
   _supportsClickToInspect: boolean = false;
@@ -193,6 +236,7 @@ export default class Store extends EventEmitter<{
   // These options default to false but may be updated as roots are added and removed.
   _rootSupportsBasicProfiling: boolean = false;
   _rootSupportsTimelineProfiling: boolean = false;
+  _rootSupportsPerformanceTracks: boolean = false;
 
   _bridgeProtocol: BridgeProtocol | null = null;
   _unsupportedBridgeProtocolDetected: boolean = false;
@@ -470,6 +514,11 @@ export default class Store extends EventEmitter<{
   // At least one of the currently mounted roots support the Timeline profiler.
   get rootSupportsTimelineProfiling(): boolean {
     return this._rootSupportsTimelineProfiling;
+  }
+
+  // At least one of the currently mounted roots support performance tracks.
+  get rootSupportsPerformanceTracks(): boolean {
+    return this._rootSupportsPerformanceTracks;
   }
 
   get supportsInspectMatchingDOMElement(): boolean {
@@ -838,6 +887,130 @@ export default class Store extends EventEmitter<{
     return list;
   }
 
+  getSuspenseLineage(
+    suspenseID: SuspenseNode['id'],
+  ): $ReadOnlyArray<SuspenseNode['id']> {
+    const lineage: Array<SuspenseNode['id']> = [];
+    let next: null | SuspenseNode = this.getSuspenseByID(suspenseID);
+    while (next !== null) {
+      if (next.parentID === 0) {
+        next = null;
+      } else {
+        lineage.unshift(next.id);
+        next = this.getSuspenseByID(next.parentID);
+      }
+    }
+
+    return lineage;
+  }
+
+  /**
+   * Like {@link getRootIDForElement} but should be used for traversing Suspense since it works with disconnected nodes.
+   */
+  getSuspenseRootIDForSuspense(id: SuspenseNode['id']): number | null {
+    let current = this._idToSuspense.get(id);
+    while (current !== undefined) {
+      if (current.parentID === 0) {
+        return current.id;
+      } else {
+        current = this._idToSuspense.get(current.parentID);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * @param rootID
+   * @param uniqueSuspendersOnly Filters out boundaries without unique suspenders
+   */
+  getSuspendableDocumentOrderSuspense(
+    uniqueSuspendersOnly: boolean,
+  ): $ReadOnlyArray<SuspenseTimelineStep> {
+    const target: Array<SuspenseTimelineStep> = [];
+    const roots = this.roots;
+    let rootStep: null | SuspenseTimelineStep = null;
+    for (let i = 0; i < roots.length; i++) {
+      const rootID = roots[i];
+      const root = this.getElementByID(rootID);
+      if (root === null) {
+        continue;
+      }
+      // TODO: This includes boundaries that can't be suspended due to no support from the renderer.
+
+      const suspense = this.getSuspenseByID(rootID);
+      if (suspense !== null) {
+        const environments = suspense.environments;
+        const environmentName =
+          environments.length > 0
+            ? environments[environments.length - 1]
+            : null;
+        if (rootStep === null) {
+          // Arbitrarily use the first root as the root step id.
+          rootStep = {
+            id: suspense.id,
+            environment: environmentName,
+          };
+          target.push(rootStep);
+        } else if (rootStep.environment === null) {
+          // If any root has an environment name, then let's use it.
+          rootStep.environment = environmentName;
+        }
+        this.pushTimelineStepsInDocumentOrder(
+          suspense.children,
+          target,
+          uniqueSuspendersOnly,
+          environments,
+        );
+      }
+    }
+
+    return target;
+  }
+
+  pushTimelineStepsInDocumentOrder(
+    children: Array<SuspenseNode['id']>,
+    target: Array<SuspenseTimelineStep>,
+    uniqueSuspendersOnly: boolean,
+    parentEnvironments: Array<string>,
+  ): void {
+    for (let i = 0; i < children.length; i++) {
+      const child = this.getSuspenseByID(children[i]);
+      if (child === null) {
+        continue;
+      }
+      // Ignore any suspense boundaries that has no visual representation as this is not
+      // part of the visible loading sequence.
+      // TODO: Consider making visible meta data and other side-effects get virtual rects.
+      const hasRects =
+        child.rects !== null &&
+        child.rects.length > 0 &&
+        child.rects.some(isNonZeroRect);
+      const childEnvironments = child.environments;
+      // Since children are blocked on the parent, they're also blocked by the parent environments.
+      // Only if we discover a novel environment do we add that and it becomes the name we use.
+      const unionEnvironments = unionOfTwoArrays(
+        parentEnvironments,
+        childEnvironments,
+      );
+      const environmentName =
+        unionEnvironments.length > 0
+          ? unionEnvironments[unionEnvironments.length - 1]
+          : null;
+      if (hasRects && (!uniqueSuspendersOnly || child.hasUniqueSuspenders)) {
+        target.push({
+          id: child.id,
+          environment: environmentName,
+        });
+      }
+      this.pushTimelineStepsInDocumentOrder(
+        child.children,
+        target,
+        uniqueSuspendersOnly,
+        unionEnvironments,
+      );
+    }
+  }
+
   getRendererIDForElement(id: number): number | null {
     let current = this._idToElement.get(id);
     while (current !== undefined) {
@@ -1021,6 +1194,8 @@ export default class Store extends EventEmitter<{
     const addedElementIDs: Array<number> = [];
     // This is a mapping of removed ID -> parent ID:
     const removedElementIDs: Map<number, number> = new Map();
+    const removedSuspenseIDs: Map<SuspenseNode['id'], SuspenseNode['id']> =
+      new Map();
     // We'll use the parent ID to adjust selection if it gets deleted.
 
     let i = 2;
@@ -1072,11 +1247,20 @@ export default class Store extends EventEmitter<{
             const isStrictModeCompliant = operations[i] > 0;
             i++;
 
+            const profilerFlags = operations[i++];
             const supportsBasicProfiling =
-              (operations[i] & PROFILING_FLAG_BASIC_SUPPORT) !== 0;
+              (profilerFlags & PROFILING_FLAG_BASIC_SUPPORT) !== 0;
             const supportsTimeline =
-              (operations[i] & PROFILING_FLAG_TIMELINE_SUPPORT) !== 0;
-            i++;
+              (profilerFlags & PROFILING_FLAG_TIMELINE_SUPPORT) !== 0;
+            const supportsPerformanceTracks =
+              (profilerFlags & PROFILING_FLAG_PERFORMANCE_TRACKS_SUPPORT) !== 0;
+            let supportsAdvancedProfiling: AdvancedProfiling =
+              ADVANCED_PROFILING_NONE;
+            if (supportsPerformanceTracks) {
+              supportsAdvancedProfiling = ADVANCED_PROFILING_PERFORMANCE_TRACKS;
+            } else if (supportsTimeline) {
+              supportsAdvancedProfiling = ADVANCED_PROFILING_TIMELINE;
+            }
 
             let supportsStrictMode = false;
             let hasOwnerMetadata = false;
@@ -1100,7 +1284,7 @@ export default class Store extends EventEmitter<{
               supportsBasicProfiling,
               hasOwnerMetadata,
               supportsStrictMode,
-              supportsTimeline,
+              supportsAdvancedProfiling,
             });
 
             // Not all roots support StrictMode;
@@ -1427,7 +1611,8 @@ export default class Store extends EventEmitter<{
           const id = operations[i + 1];
           const parentID = operations[i + 2];
           const nameStringID = operations[i + 3];
-          const numRects = ((operations[i + 4]: any): number);
+          const isSuspended = operations[i + 4] === 1;
+          const numRects = ((operations[i + 5]: any): number);
           let name = stringTable[nameStringID];
 
           if (this._idToSuspense.has(id)) {
@@ -1445,22 +1630,32 @@ export default class Store extends EventEmitter<{
             if (name === null) {
               // The boundary isn't explicitly named.
               // Pick a sensible default.
-              name = this._guessSuspenseName(element);
+              if (parentID === 0) {
+                // For Roots we use their display name.
+                name = element.displayName;
+              } else {
+                name = this._guessSuspenseName(element);
+              }
             }
           }
 
-          i += 5;
+          i += 6;
           let rects: SuspenseNode['rects'];
           if (numRects === -1) {
             rects = null;
           } else {
             rects = [];
             for (let rectIndex = 0; rectIndex < numRects; rectIndex++) {
-              const x = operations[i + 0];
-              const y = operations[i + 1];
-              const width = operations[i + 2];
-              const height = operations[i + 3];
-              rects.push({x, y, width, height});
+              const x = operations[i + 0] / 1000;
+              const y = operations[i + 1] / 1000;
+              const width = operations[i + 2] / 1000;
+              const height = operations[i + 3] / 1000;
+              const rect = {x, y, width, height};
+              if (parentID !== 0) {
+                // Track all rects except the root.
+                this._rtree.insert(rect);
+              }
+              rects.push(rect);
               i += 4;
             }
           }
@@ -1484,16 +1679,15 @@ export default class Store extends EventEmitter<{
             parentSuspense.children.push(id);
           }
 
-          if (name === null) {
-            name = 'Unknown';
-          }
-
           this._idToSuspense.set(id, {
             id,
             parentID,
             children: [],
             name,
             rects,
+            hasUniqueSuspenders: false,
+            isSuspended: isSuspended,
+            environments: [],
           });
 
           hasSuspenseTreeChanged = true;
@@ -1519,14 +1713,22 @@ export default class Store extends EventEmitter<{
 
             i += 1;
 
-            const {children, parentID} = suspense;
+            const {children, parentID, rects} = suspense;
             if (children.length > 0) {
               this._throwAndEmitError(
                 Error(`Suspense node "${id}" was removed before its children.`),
               );
             }
 
+            if (rects !== null && parentID !== 0) {
+              // Delete all the existing rects from the R-tree
+              for (let j = 0; j < rects.length; j++) {
+                this._rtree.remove(rects[j]);
+              }
+            }
+
             this._idToSuspense.delete(id);
+            removedSuspenseIDs.set(id, parentID);
 
             let parentSuspense: ?SuspenseNode = null;
             if (parentID === 0) {
@@ -1623,18 +1825,31 @@ export default class Store extends EventEmitter<{
             break;
           }
 
+          const prevRects = suspense.rects;
+          if (prevRects !== null && suspense.parentID !== 0) {
+            // Delete all the existing rects from the R-tree
+            for (let j = 0; j < prevRects.length; j++) {
+              this._rtree.remove(prevRects[j]);
+            }
+          }
+
           let nextRects: SuspenseNode['rects'];
           if (numRects === -1) {
             nextRects = null;
           } else {
             nextRects = [];
             for (let rectIndex = 0; rectIndex < numRects; rectIndex++) {
-              const x = operations[i + 0];
-              const y = operations[i + 1];
-              const width = operations[i + 2];
-              const height = operations[i + 3];
+              const x = operations[i + 0] / 1000;
+              const y = operations[i + 1] / 1000;
+              const width = operations[i + 2] / 1000;
+              const height = operations[i + 3] / 1000;
 
-              nextRects.push({x, y, width, height});
+              const rect = {x, y, width, height};
+              if (suspense.parentID !== 0) {
+                // Track all rects except the root.
+                this._rtree.insert(rect);
+              }
+              nextRects.push(rect);
 
               i += 4;
             }
@@ -1656,6 +1871,56 @@ export default class Store extends EventEmitter<{
                       .join(',')
               }`,
             );
+          }
+
+          hasSuspenseTreeChanged = true;
+
+          break;
+        }
+        case SUSPENSE_TREE_OPERATION_SUSPENDERS: {
+          i++;
+          const changeLength = operations[i++];
+
+          for (let changeIndex = 0; changeIndex < changeLength; changeIndex++) {
+            const id = operations[i++];
+            const hasUniqueSuspenders = operations[i++] === 1;
+            const isSuspended = operations[i++] === 1;
+            const environmentNamesLength = operations[i++];
+            const environmentNames = [];
+            for (
+              let envIndex = 0;
+              envIndex < environmentNamesLength;
+              envIndex++
+            ) {
+              const environmentNameStringID = operations[i++];
+              const environmentName = stringTable[environmentNameStringID];
+              if (environmentName != null) {
+                environmentNames.push(environmentName);
+              }
+            }
+            const suspense = this._idToSuspense.get(id);
+
+            if (suspense === undefined) {
+              this._throwAndEmitError(
+                Error(
+                  `Cannot update suspenders of suspense node "${id}" because no matching node was found in the Store.`,
+                ),
+              );
+
+              break;
+            }
+
+            if (__DEBUG__) {
+              const previousHasUniqueSuspenders = suspense.hasUniqueSuspenders;
+              debug(
+                'Suspender changes',
+                `Suspense node ${id} unique suspenders set to ${String(hasUniqueSuspenders)} (was ${String(previousHasUniqueSuspenders)})`,
+              );
+            }
+
+            suspense.hasUniqueSuspenders = hasUniqueSuspenders;
+            suspense.isSuspended = isSuspended;
+            suspense.environments = environmentNames;
           }
 
           hasSuspenseTreeChanged = true;
@@ -1701,20 +1966,32 @@ export default class Store extends EventEmitter<{
       const prevRootSupportsProfiling = this._rootSupportsBasicProfiling;
       const prevRootSupportsTimelineProfiling =
         this._rootSupportsTimelineProfiling;
+      const prevRootSupportsPerformanceTracks =
+        this._rootSupportsPerformanceTracks;
 
       this._hasOwnerMetadata = false;
       this._rootSupportsBasicProfiling = false;
       this._rootSupportsTimelineProfiling = false;
+      this._rootSupportsPerformanceTracks = false;
       this._rootIDToCapabilities.forEach(
-        ({supportsBasicProfiling, hasOwnerMetadata, supportsTimeline}) => {
+        ({
+          supportsBasicProfiling,
+          hasOwnerMetadata,
+          supportsAdvancedProfiling,
+        }) => {
           if (supportsBasicProfiling) {
             this._rootSupportsBasicProfiling = true;
           }
           if (hasOwnerMetadata) {
             this._hasOwnerMetadata = true;
           }
-          if (supportsTimeline) {
+          if (supportsAdvancedProfiling === ADVANCED_PROFILING_TIMELINE) {
             this._rootSupportsTimelineProfiling = true;
+          }
+          if (
+            supportsAdvancedProfiling === ADVANCED_PROFILING_PERFORMANCE_TRACKS
+          ) {
+            this._rootSupportsPerformanceTracks = true;
           }
         },
       );
@@ -1731,10 +2008,16 @@ export default class Store extends EventEmitter<{
       ) {
         this.emit('rootSupportsTimelineProfiling');
       }
+      if (
+        this._rootSupportsPerformanceTracks !==
+        prevRootSupportsPerformanceTracks
+      ) {
+        this.emit('rootSupportsPerformanceTracks');
+      }
     }
 
     if (hasSuspenseTreeChanged) {
-      this.emit('suspenseTreeMutated');
+      this.emit('suspenseTreeMutated', [removedSuspenseIDs]);
     }
 
     if (__DEBUG__) {
@@ -1937,11 +2220,9 @@ export default class Store extends EventEmitter<{
   }
 
   _guessSuspenseName(element: Element): string | null {
-    // TODO: Use key
     const owner = this._idToElement.get(element.ownerID);
-    if (owner !== undefined) {
-      // TODO: This is clowny
-      return `${owner.displayName || 'Unknown'}>?`;
+    if (owner !== undefined && owner.displayName !== null) {
+      return owner.displayName;
     }
 
     return null;

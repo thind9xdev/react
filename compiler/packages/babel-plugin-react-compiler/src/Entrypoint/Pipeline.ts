@@ -103,6 +103,8 @@ import {validateNoFreezingKnownMutableFunctions} from '../Validation/ValidateNoF
 import {inferMutationAliasingEffects} from '../Inference/InferMutationAliasingEffects';
 import {inferMutationAliasingRanges} from '../Inference/InferMutationAliasingRanges';
 import {validateNoDerivedComputationsInEffects} from '../Validation/ValidateNoDerivedComputationsInEffects';
+import {validateNoDerivedComputationsInEffects_exp} from '../Validation/ValidateNoDerivedComputationsInEffects_exp';
+import {nameAnonymousFunctions} from '../Transform/NameAnonymousFunctions';
 
 export type CompilerPipelineValue =
   | {kind: 'ast'; name: string; value: CodegenFunction}
@@ -274,8 +276,12 @@ function runWithEnvironment(
       validateNoDerivedComputationsInEffects(hir);
     }
 
+    if (env.config.validateNoDerivedComputationsInEffects_exp) {
+      validateNoDerivedComputationsInEffects_exp(hir);
+    }
+
     if (env.config.validateNoSetStateInEffects) {
-      env.logErrors(validateNoSetStateInEffects(hir));
+      env.logErrors(validateNoSetStateInEffects(hir, env));
     }
 
     if (env.config.validateNoJSXInTryStatements) {
@@ -322,6 +328,15 @@ function runWithEnvironment(
 
   if (env.config.enableJsxOutlining) {
     outlineJSX(hir);
+  }
+
+  if (env.config.enableNameAnonymousFunctions) {
+    nameAnonymousFunctions(hir);
+    log({
+      kind: 'hir',
+      name: 'NameAnonymousFunctions',
+      value: hir,
+    });
   }
 
   if (env.config.enableFunctionOutlining) {

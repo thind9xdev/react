@@ -8,7 +8,7 @@
  */
 
 import type {Thenable, ReactCustomFormAction} from 'shared/ReactTypes.js';
-import type {Response} from 'react-client/src/ReactFlightClient';
+import type {DebugChannel, Response} from 'react-client/src/ReactFlightClient';
 import type {Readable} from 'stream';
 
 import {
@@ -52,6 +52,7 @@ export type Options = {
   encodeFormAction?: EncodeFormActionCallback,
   replayConsoleLogs?: boolean,
   environmentName?: string,
+  startTime?: number,
   // For the Node.js client we only support a single-direction debug channel.
   debugChannel?: Readable,
 };
@@ -59,9 +60,9 @@ export type Options = {
 function startReadingFromStream(
   response: Response,
   stream: Readable,
-  isSecondaryStream: boolean,
+  onEnd: () => void,
 ): void {
-  const streamState = createStreamState();
+  const streamState = createStreamState(response, stream);
 
   stream.on('data', chunk => {
     if (typeof chunk === 'string') {
@@ -75,19 +76,21 @@ function startReadingFromStream(
     reportGlobalError(response, error);
   });
 
-  stream.on('end', () => {
-    // If we're the secondary stream, then we don't close the response until the
-    // debug channel closes.
-    if (!isSecondaryStream) {
-      close(response);
-    }
-  });
+  stream.on('end', onEnd);
 }
 
 export function createFromNodeStream<T>(
   stream: Readable,
   options?: Options,
 ): Thenable<T> {
+  const debugChannel: void | DebugChannel =
+    __DEV__ && options && options.debugChannel !== undefined
+      ? {
+          hasReadable: options.debugChannel.readable !== undefined,
+          callback: null,
+        }
+      : undefined;
+
   const response: Response = createResponse(
     null, // bundlerConfig
     null, // serverReferenceConfig
@@ -101,13 +104,23 @@ export function createFromNodeStream<T>(
     __DEV__ && options && options.environmentName
       ? options.environmentName
       : undefined,
+    __DEV__ && options && options.startTime != null
+      ? options.startTime
+      : undefined,
+    debugChannel,
   );
 
   if (__DEV__ && options && options.debugChannel) {
-    startReadingFromStream(response, options.debugChannel, false);
-    startReadingFromStream(response, stream, true);
+    let streamEndedCount = 0;
+    const handleEnd = () => {
+      if (++streamEndedCount === 2) {
+        close(response);
+      }
+    };
+    startReadingFromStream(response, options.debugChannel, handleEnd);
+    startReadingFromStream(response, stream, handleEnd);
   } else {
-    startReadingFromStream(response, stream, false);
+    startReadingFromStream(response, stream, close.bind(null, response));
   }
 
   return getRoot(response);

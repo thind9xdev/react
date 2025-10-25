@@ -6,8 +6,8 @@
  */
 
 import * as t from '@babel/types';
-import {ZodError, z} from 'zod';
-import {fromZodError} from 'zod-validation-error';
+import {ZodError, z} from 'zod/v4';
+import {fromZodError} from 'zod-validation-error/v4';
 import {CompilerError} from '../CompilerError';
 import {Logger, ProgramContext} from '../Entrypoint';
 import {Err, Ok, Result} from '../Utils/Result';
@@ -50,6 +50,7 @@ import {
 import {Scope as BabelScope, NodePath} from '@babel/traverse';
 import {TypeSchema} from './TypeSchema';
 import {FlowTypeEnv} from '../Flood/Types';
+import {defaultModuleTypeProvider} from './DefaultModuleTypeProvider';
 
 export const ReactElementSymbolSchema = z.object({
   elementSymbol: z.union([
@@ -82,21 +83,11 @@ export type ExternalFunction = z.infer<typeof ExternalFunctionSchema>;
 export const USE_FIRE_FUNCTION_NAME = 'useFire';
 export const EMIT_FREEZE_GLOBAL_GATING = '__DEV__';
 
-export const MacroMethodSchema = z.union([
-  z.object({type: z.literal('wildcard')}),
-  z.object({type: z.literal('name'), name: z.string()}),
-]);
-
-// Would like to change this to drop the string option, but breaks compatibility with existing configs
-export const MacroSchema = z.union([
-  z.string(),
-  z.tuple([z.string(), z.array(MacroMethodSchema)]),
-]);
+export const MacroSchema = z.string();
 
 export type CompilerMode = 'all_features' | 'no_inferred_memo';
 
 export type Macro = z.infer<typeof MacroSchema>;
-export type MacroMethod = z.infer<typeof MacroMethodSchema>;
 
 const HookSchema = z.object({
   /*
@@ -158,7 +149,7 @@ export const EnvironmentConfigSchema = z.object({
    * A function that, given the name of a module, can optionally return a description
    * of that module's type signature.
    */
-  moduleTypeProvider: z.nullable(z.function().args(z.string())).default(null),
+  moduleTypeProvider: z.nullable(z.any()).default(null),
 
   /**
    * A list of functions which the application compiles as macros, where
@@ -209,7 +200,7 @@ export const EnvironmentConfigSchema = z.object({
    * that if a useEffect or useCallback references a function value, that function value will be
    * considered frozen, and in turn all of its referenced variables will be considered frozen as well.
    */
-  enablePreserveExistingMemoizationGuarantees: z.boolean().default(false),
+  enablePreserveExistingMemoizationGuarantees: z.boolean().default(true),
 
   /**
    * Validates that all useMemo/useCallback values are also memoized by Forget. This mode can be
@@ -248,7 +239,7 @@ export const EnvironmentConfigSchema = z.object({
    * Allows specifying a function that can populate HIR with type information from
    * Flow
    */
-  flowTypeProvider: z.nullable(z.function().args(z.string())).default(null),
+  flowTypeProvider: z.nullable(z.any()).default(null),
 
   /**
    * Enables inference of optional dependency chains. Without this flag
@@ -259,6 +250,8 @@ export const EnvironmentConfigSchema = z.object({
   enableOptionalDependencies: z.boolean().default(true),
 
   enableFire: z.boolean().default(false),
+
+  enableNameAnonymousFunctions: z.boolean().default(false),
 
   /**
    * Enables inference and auto-insertion of effect dependencies. Takes in an array of
@@ -330,6 +323,12 @@ export const EnvironmentConfigSchema = z.object({
    * during render.
    */
   validateNoDerivedComputationsInEffects: z.boolean().default(false),
+
+  /**
+   * Experimental: Validates that effects are not used to calculate derived data which could instead be computed
+   * during render. Generates a custom error message for each type of violation.
+   */
+  validateNoDerivedComputationsInEffects_exp: z.boolean().default(false),
 
   /**
    * Validates against creating JSX within a try block and recommends using an error boundary
@@ -618,6 +617,13 @@ export const EnvironmentConfigSchema = z.object({
    */
   enableTreatRefLikeIdentifiersAsRefs: z.boolean().default(true),
 
+  /**
+   * Treat identifiers as SetState type if both
+   * - they are named with a "set-" prefix
+   * - they are called somewhere
+   */
+  enableTreatSetIdentifiersAsStateSetters: z.boolean().default(false),
+
   /*
    * If specified a value, the compiler lowers any calls to `useContext` to use
    * this value as the callee.
@@ -649,7 +655,21 @@ export const EnvironmentConfigSchema = z.object({
    * Invalid:
    *   useMemo(() => { ... }, [...]);
    */
-  validateNoVoidUseMemo: z.boolean().default(false),
+  validateNoVoidUseMemo: z.boolean().default(true),
+
+  /**
+   * Validates that Components/Hooks are always defined at module level. This prevents scope
+   * reference errors that occur when the compiler attempts to optimize the nested component/hook
+   * while its parent function remains uncompiled.
+   */
+  validateNoDynamicallyCreatedComponentsOrHooks: z.boolean().default(false),
+
+  /**
+   * When enabled, allows setState calls in effects when the value being set is
+   * derived from a ref. This is useful for patterns where initial layout measurements
+   * from refs need to be stored in state during mount.
+   */
+  enableAllowSetStateFromRefsInEffects: z.boolean().default(true),
 });
 
 export type EnvironmentConfig = z.infer<typeof EnvironmentConfigSchema>;
@@ -742,7 +762,13 @@ export class Environment {
       CompilerError.invariant(!this.#globals.has(hookName), {
         reason: `[Globals] Found existing definition in global registry for custom hook ${hookName}`,
         description: null,
-        loc: null,
+        details: [
+          {
+            kind: 'error',
+            loc: null,
+            message: null,
+          },
+        ],
         suggestions: null,
       });
       this.#globals.set(
@@ -775,7 +801,14 @@ export class Environment {
       CompilerError.invariant(code != null, {
         reason:
           'Expected Environment to be initialized with source code when a Flow type provider is specified',
-        loc: null,
+        description: null,
+        details: [
+          {
+            kind: 'error',
+            loc: null,
+            message: null,
+          },
+        ],
       });
       this.#flowTypeEnvironment.init(this, code);
     } else {
@@ -786,7 +819,14 @@ export class Environment {
   get typeContext(): FlowTypeEnv {
     CompilerError.invariant(this.#flowTypeEnvironment != null, {
       reason: 'Flow type environment not initialized',
-      loc: null,
+      description: null,
+      details: [
+        {
+          kind: 'error',
+          loc: null,
+          message: null,
+        },
+      ],
     });
     return this.#flowTypeEnvironment;
   }
@@ -853,10 +893,22 @@ export class Environment {
   #resolveModuleType(moduleName: string, loc: SourceLocation): Global | null {
     let moduleType = this.#moduleTypes.get(moduleName);
     if (moduleType === undefined) {
-      if (this.config.moduleTypeProvider == null) {
+      /*
+       * NOTE: Zod doesn't work when specifying a function as a default, so we have to
+       * fallback to the default value here
+       */
+      const moduleTypeProvider =
+        this.config.moduleTypeProvider ?? defaultModuleTypeProvider;
+      if (moduleTypeProvider == null) {
         return null;
       }
-      const unparsedModuleConfig = this.config.moduleTypeProvider(moduleName);
+      if (typeof moduleTypeProvider !== 'function') {
+        CompilerError.throwInvalidConfig({
+          reason: `Expected a function for \`moduleTypeProvider\``,
+          loc,
+        });
+      }
+      const unparsedModuleConfig = moduleTypeProvider(moduleName);
       if (unparsedModuleConfig != null) {
         const parsedModuleConfig = TypeSchema.safeParse(unparsedModuleConfig);
         if (!parsedModuleConfig.success) {
@@ -1030,7 +1082,13 @@ export class Environment {
       CompilerError.invariant(shape !== undefined, {
         reason: `[HIR] Forget internal error: cannot resolve shape ${shapeId}`,
         description: null,
-        loc: null,
+        details: [
+          {
+            kind: 'error',
+            loc: null,
+            message: null,
+          },
+        ],
         suggestions: null,
       });
       return shape.properties.get('*') ?? null;
@@ -1055,7 +1113,13 @@ export class Environment {
       CompilerError.invariant(shape !== undefined, {
         reason: `[HIR] Forget internal error: cannot resolve shape ${shapeId}`,
         description: null,
-        loc: null,
+        details: [
+          {
+            kind: 'error',
+            loc: null,
+            message: null,
+          },
+        ],
         suggestions: null,
       });
       if (typeof property === 'string') {
@@ -1080,7 +1144,13 @@ export class Environment {
       CompilerError.invariant(shape !== undefined, {
         reason: `[HIR] Forget internal error: cannot resolve shape ${shapeId}`,
         description: null,
-        loc: null,
+        details: [
+          {
+            kind: 'error',
+            loc: null,
+            message: null,
+          },
+        ],
         suggestions: null,
       });
       return shape.functionType;

@@ -22,11 +22,11 @@ export const {
   alwaysThrottleRetries,
   enableHiddenSubtreeInsertionEffectCleanup,
   enableObjectFiber,
-  enablePersistedModeClonedFlag,
   enableEagerAlternateStateNodeCleanup,
   passChildrenWhenCloningPersistedNodes,
   renameElementSymbol,
   enableFragmentRefs,
+  enableFragmentRefsScrollIntoView,
 } = dynamicFlags;
 
 // The rest of the flags are static for better dead code elimination.
@@ -44,7 +44,7 @@ export const enableCPUSuspense: boolean = true;
 export const enableCreateEventHandleAPI: boolean = false;
 export const enableMoveBefore: boolean = true;
 export const enableFizzExternalRuntime: boolean = true;
-export const enableHalt: boolean = false;
+export const enableHalt: boolean = true;
 export const enableInfiniteRenderLoopDetection: boolean = false;
 export const enableLegacyCache: boolean = false;
 export const enableLegacyFBSupport: boolean = false;
@@ -64,7 +64,7 @@ export const enableTaint: boolean = true;
 export const enableTransitionTracing: boolean = false;
 export const enableTrustedTypesIntegration: boolean = false;
 export const enableUpdaterTracking: boolean = __PROFILE__;
-export const enableUseEffectEventHook: boolean = false;
+export const enableUseEffectEventHook: boolean = true;
 export const retryLaneExpirationMs = 5000;
 export const syncLaneExpirationMs = 250;
 export const transitionLaneExpirationMs = 5000;
@@ -78,7 +78,7 @@ export const enableSuspenseyImages: boolean = false;
 export const enableFizzBlockingRender: boolean = true;
 export const enableSrcObject: boolean = false;
 export const enableHydrationChangeEvent: boolean = true;
-export const enableDefaultTransitionIndicator: boolean = false;
+export const enableDefaultTransitionIndicator: boolean = true;
 export const ownerStackLimit = 1e4;
 export const enableComponentPerformanceTrack: boolean =
   __PROFILE__ && dynamicFlags.enableComponentPerformanceTrack;

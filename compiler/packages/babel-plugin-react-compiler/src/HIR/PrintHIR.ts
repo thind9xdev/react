@@ -56,6 +56,9 @@ export function printFunction(fn: HIRFunction): string {
   } else {
     definition += '<<anonymous>>';
   }
+  if (fn.nameHint != null) {
+    definition += ` ${fn.nameHint}`;
+  }
   if (fn.params.length !== 0) {
     definition +=
       '(' +
@@ -596,7 +599,13 @@ export function printInstructionValue(instrValue: ReactiveValue): string {
         {
           reason: 'Bad assumption about quasi length.',
           description: null,
-          loc: instrValue.loc,
+          details: [
+            {
+              kind: 'error',
+              loc: instrValue.loc,
+              message: null,
+            },
+          ],
           suggestions: null,
         },
       );
@@ -865,8 +874,15 @@ export function printManualMemoDependency(
   } else {
     CompilerError.invariant(val.root.value.identifier.name?.kind === 'named', {
       reason: 'DepsValidation: expected named local variable in depslist',
+      description: null,
       suggestions: null,
-      loc: val.root.value.loc,
+      details: [
+        {
+          kind: 'error',
+          loc: val.root.value.loc,
+          message: null,
+        },
+      ],
     });
     rootStr = nameOnly
       ? val.root.value.identifier.name.value
@@ -880,7 +896,8 @@ export function printType(type: Type): string {
   if (type.kind === 'Object' && type.shapeId != null) {
     return `:T${type.kind}<${type.shapeId}>`;
   } else if (type.kind === 'Function' && type.shapeId != null) {
-    return `:T${type.kind}<${type.shapeId}>`;
+    const returnType = printType(type.return);
+    return `:T${type.kind}<${type.shapeId}>()${returnType !== '' ? `:  ${returnType}` : ''}`;
   } else {
     return `:T${type.kind}`;
   }
@@ -983,7 +1000,7 @@ export function printAliasingEffect(effect: AliasingEffect): string {
     case 'MutateConditionally':
     case 'MutateTransitive':
     case 'MutateTransitiveConditionally': {
-      return `${effect.kind} ${printPlaceForAliasEffect(effect.value)}`;
+      return `${effect.kind} ${printPlaceForAliasEffect(effect.value)}${effect.kind === 'Mutate' && effect.reason?.kind === 'AssignCurrentProperty' ? ' (assign `.current`)' : ''}`;
     }
     case 'MutateFrozen': {
       return `MutateFrozen ${printPlaceForAliasEffect(effect.place)} reason=${JSON.stringify(effect.error.reason)}`;

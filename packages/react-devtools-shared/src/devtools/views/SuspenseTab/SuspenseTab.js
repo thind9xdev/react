@@ -8,21 +8,40 @@
  */
 
 import * as React from 'react';
-import {useEffect, useLayoutEffect, useReducer, useRef} from 'react';
+import {
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useReducer,
+  useRef,
+  Fragment,
+} from 'react';
 
 import {
   localStorageGetItem,
   localStorageSetItem,
 } from 'react-devtools-shared/src/storage';
 import ButtonIcon, {type IconType} from '../ButtonIcon';
+import InspectHostNodesToggle from '../Components/InspectHostNodesToggle';
 import InspectedElementErrorBoundary from '../Components/InspectedElementErrorBoundary';
 import InspectedElement from '../Components/InspectedElement';
 import portaledContent from '../portaledContent';
 import styles from './SuspenseTab.css';
+import SuspenseBreadcrumbs from './SuspenseBreadcrumbs';
 import SuspenseRects from './SuspenseRects';
+import SuspenseTimeline from './SuspenseTimeline';
 import SuspenseTreeList from './SuspenseTreeList';
+import {
+  SuspenseTreeDispatcherContext,
+  SuspenseTreeStateContext,
+} from './SuspenseTreeContext';
+import {StoreContext, OptionsContext} from '../context';
 import Button from '../Button';
+import Toggle from '../Toggle';
 import typeof {SyntheticPointerEvent} from 'react-dom-bindings/src/events/SyntheticEvent';
+import SettingsModal from 'react-devtools-shared/src/devtools/views/Settings/SettingsModal';
+import SettingsModalContextToggle from 'react-devtools-shared/src/devtools/views/Settings/SettingsModalContextToggle';
+import {SettingsModalContextController} from 'react-devtools-shared/src/devtools/views/Settings/SettingsModalContext';
 
 type Orientation = 'horizontal' | 'vertical';
 
@@ -46,8 +65,34 @@ type LayoutState = {
 };
 type LayoutDispatch = (action: LayoutAction) => void;
 
-function SuspenseTimeline() {
-  return <div className={styles.Timeline}>timeline</div>;
+function ToggleUniqueSuspenders() {
+  const store = useContext(StoreContext);
+  const suspenseTreeDispatch = useContext(SuspenseTreeDispatcherContext);
+
+  const {uniqueSuspendersOnly} = useContext(SuspenseTreeStateContext);
+
+  function handleToggleUniqueSuspenders() {
+    const nextUniqueSuspendersOnly = !uniqueSuspendersOnly;
+    // TODO: Handle different timeline modes (e.g. random order)
+    const nextTimeline = store.getSuspendableDocumentOrderSuspense(
+      nextUniqueSuspendersOnly,
+    );
+    suspenseTreeDispatch({
+      type: 'SET_SUSPENSE_TIMELINE',
+      payload: [nextTimeline, null, nextUniqueSuspendersOnly],
+    });
+  }
+
+  return (
+    <Toggle
+      isChecked={uniqueSuspendersOnly}
+      onChange={handleToggleUniqueSuspenders}
+      title={
+        'Filter Suspense which does not suspend, or if the parent also suspend on the same.'
+      }>
+      <ButtonIcon type={uniqueSuspendersOnly ? 'filter-on' : 'filter-off'} />
+    </Toggle>
+  );
 }
 
 function ToggleTreeList({
@@ -113,11 +158,18 @@ function ToggleInspectedElement({
 }
 
 function SuspenseTab(_: {}) {
+  const store = useContext(StoreContext);
+  const {hideSettings} = useContext(OptionsContext);
   const [state, dispatch] = useReducer<LayoutState, null, LayoutAction>(
     layoutReducer,
     null,
     initLayoutState,
   );
+
+  // If there are no named Activity boundaries, we don't have any tree list and we should hide
+  // both the panel and the button to toggle it. Since we currently don't support it yet, it's
+  // always disabled.
+  const treeListDisabled = true;
 
   const wrapperTreeRef = useRef<null | HTMLElement>(null);
   const resizeTreeRef = useRef<null | HTMLElement>(null);
@@ -290,60 +342,87 @@ function SuspenseTab(_: {}) {
   };
 
   return (
-    <div className={styles.SuspenseTab} ref={wrapperTreeRef}>
-      <div className={styles.TreeWrapper} ref={resizeTreeRef}>
-        <div
-          className={styles.TreeList}
-          hidden={treeListHidden}
-          ref={resizeTreeListRef}>
-          <SuspenseTreeList />
+    <SettingsModalContextController>
+      <div className={styles.SuspenseTab} ref={wrapperTreeRef}>
+        <div className={styles.TreeWrapper} ref={resizeTreeRef}>
+          {treeListDisabled ? null : (
+            <div
+              className={styles.TreeList}
+              hidden={treeListHidden}
+              ref={resizeTreeListRef}>
+              <SuspenseTreeList />
+            </div>
+          )}
+          {treeListDisabled ? null : (
+            <div className={styles.ResizeBarWrapper} hidden={treeListHidden}>
+              <div
+                onPointerDown={onResizeStart}
+                onPointerMove={onResizeTreeList}
+                onPointerUp={onResizeEnd}
+                className={styles.ResizeBar}
+              />
+            </div>
+          )}
+          <div className={styles.TreeView}>
+            <header className={styles.SuspenseTreeViewHeader}>
+              {treeListDisabled ? (
+                <div />
+              ) : (
+                <ToggleTreeList dispatch={dispatch} state={state} />
+              )}
+              {store.supportsClickToInspect && (
+                <Fragment>
+                  <InspectHostNodesToggle onlySuspenseNodes={true} />
+                  <div className={styles.VRule} />
+                </Fragment>
+              )}
+              <div className={styles.SuspenseBreadcrumbs}>
+                <SuspenseBreadcrumbs />
+              </div>
+              <div className={styles.VRule} />
+              <ToggleUniqueSuspenders />
+              {!hideSettings && <SettingsModalContextToggle />}
+              <ToggleInspectedElement
+                dispatch={dispatch}
+                state={state}
+                orientation="horizontal"
+              />
+            </header>
+            <div className={styles.Rects}>
+              <SuspenseRects />
+            </div>
+            <footer className={styles.SuspenseTreeViewFooter}>
+              <SuspenseTimeline />
+              <div className={styles.SuspenseTreeViewFooterButtons}>
+                <ToggleInspectedElement
+                  dispatch={dispatch}
+                  state={state}
+                  orientation="vertical"
+                />
+              </div>
+            </footer>
+          </div>
         </div>
-        <div className={styles.ResizeBarWrapper}>
+        <div
+          className={styles.ResizeBarWrapper}
+          hidden={inspectedElementHidden}>
           <div
             onPointerDown={onResizeStart}
-            onPointerMove={onResizeTreeList}
+            onPointerMove={onResizeTree}
             onPointerUp={onResizeEnd}
             className={styles.ResizeBar}
           />
         </div>
-        <div className={styles.TreeView}>
-          <div className={styles.TimelineWrapper}>
-            <ToggleTreeList dispatch={dispatch} state={state} />
-            <SuspenseTimeline />
-            <ToggleInspectedElement
-              dispatch={dispatch}
-              state={state}
-              orientation="horizontal"
-            />
-          </div>
-          <div className={styles.Rects}>
-            <SuspenseRects />
-          </div>
-          <footer>
-            <ToggleInspectedElement
-              dispatch={dispatch}
-              state={state}
-              orientation="vertical"
-            />
-          </footer>
-        </div>
-      </div>
-      <div className={styles.ResizeBarWrapper}>
         <div
-          onPointerDown={onResizeStart}
-          onPointerMove={onResizeTree}
-          onPointerUp={onResizeEnd}
-          className={styles.ResizeBar}
-        />
+          className={styles.InspectedElementWrapper}
+          hidden={inspectedElementHidden}>
+          <InspectedElementErrorBoundary>
+            <InspectedElement />
+          </InspectedElementErrorBoundary>
+        </div>
+        <SettingsModal />
       </div>
-      <div
-        className={styles.InspectedElementWrapper}
-        hidden={inspectedElementHidden}>
-        <InspectedElementErrorBoundary>
-          <InspectedElement />
-        </InspectedElementErrorBoundary>
-      </div>
-    </div>
+    </SettingsModalContextController>
   );
 }
 

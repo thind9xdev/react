@@ -44,6 +44,7 @@ import {
   SUSPENSE_TREE_OPERATION_REMOVE,
   SUSPENSE_TREE_OPERATION_REORDER_CHILDREN,
   SUSPENSE_TREE_OPERATION_RESIZE,
+  SUSPENSE_TREE_OPERATION_SUSPENDERS,
 } from './constants';
 import {
   ComponentFilterElementType,
@@ -339,9 +340,10 @@ export function printOperationsArray(operations: Array<number>) {
         const fiberID = operations[i + 1];
         const parentID = operations[i + 2];
         const nameStringID = operations[i + 3];
-        const numRects = operations[i + 4];
+        const isSuspended = operations[i + 4];
+        const numRects = operations[i + 5];
 
-        i += 5;
+        i += 6;
 
         const name = stringTable[nameStringID];
         let rects: string;
@@ -367,7 +369,7 @@ export function printOperationsArray(operations: Array<number>) {
         }
 
         logs.push(
-          `Add suspense node ${fiberID} (${String(name)},rects={${rects}}) under ${parentID}`,
+          `Add suspense node ${fiberID} (${String(name)},rects={${rects}}) under ${parentID} suspended ${isSuspended}`,
         );
         break;
       }
@@ -419,6 +421,23 @@ export function printOperationsArray(operations: Array<number>) {
             i += 4;
           }
           logs.push(line + ']');
+        }
+
+        break;
+      }
+      case SUSPENSE_TREE_OPERATION_SUSPENDERS: {
+        i++;
+        const changeLength = ((operations[i++]: any): number);
+
+        for (let changeIndex = 0; changeIndex < changeLength; changeIndex++) {
+          const id = operations[i++];
+          const hasUniqueSuspenders = operations[i++] === 1;
+          const isSuspended = operations[i++] === 1;
+          const environmentNamesLength = operations[i++];
+          i += environmentNamesLength;
+          logs.push(
+            `Suspense node ${id} unique suspenders set to ${String(hasUniqueSuspenders)} is suspended set to ${String(isSuspended)} with ${String(environmentNamesLength)} environments`,
+          );
         }
 
         break;
@@ -1285,4 +1304,19 @@ export function onReloadAndProfileFlagsReset(): void {
   sessionStorageRemoveItem(SESSION_STORAGE_RELOAD_AND_PROFILE_KEY);
   sessionStorageRemoveItem(SESSION_STORAGE_RECORD_CHANGE_DESCRIPTIONS_KEY);
   sessionStorageRemoveItem(SESSION_STORAGE_RECORD_TIMELINE_KEY);
+}
+
+export function unionOfTwoArrays<T>(a: Array<T>, b: Array<T>): Array<T> {
+  let result = a;
+  for (let i = 0; i < b.length; i++) {
+    const value = b[i];
+    if (a.indexOf(value) === -1) {
+      if (result === a) {
+        // Lazily copy
+        result = a.slice(0);
+      }
+      result.push(value);
+    }
+  }
+  return result;
 }

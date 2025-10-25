@@ -140,6 +140,8 @@ export function attach(
     // The changes will be flushed later when we commit this tree to Fiber.
   }
 
+  const supportsTogglingSuspense = false;
+
   return {
     cleanup() {},
     clearErrorsAndWarnings() {},
@@ -148,6 +150,9 @@ export function attach(
     getSerializedElementValueByPath() {},
     deletePath() {},
     findHostInstancesForElementID() {
+      return null;
+    },
+    findLastKnownRectsForID() {
       return null;
     },
     flushInitialOperations() {},
@@ -162,6 +167,9 @@ export function attach(
       return null;
     },
     getElementIDForHostInstance() {
+      return null;
+    },
+    getSuspenseNodeIDForHostInstance() {
       return null;
     },
     getInstanceAndStyle() {
@@ -202,6 +210,7 @@ export function attach(
     onErrorOrWarning,
     overrideError() {},
     overrideSuspense() {},
+    overrideSuspenseMilestone() {},
     overrideValueAtPath() {},
     renamePath() {},
     renderer,
@@ -210,6 +219,7 @@ export function attach(
     startProfiling() {},
     stopProfiling() {},
     storeAsGlobal() {},
+    supportsTogglingSuspense,
     updateComponentFilters() {},
     getEnvironmentNames() {
       return [];
